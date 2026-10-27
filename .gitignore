@@ -1,0 +1,14 @@
+# Ambiente virtual
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Saídas do Ultralytics
+runs/
+datasets/
+*.pt
+*.onnx
+*.tflite
