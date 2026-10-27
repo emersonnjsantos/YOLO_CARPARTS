@@ -12,3 +12,9 @@ datasets/
 *.pt
 *.onnx
 *.tflite
+
+# Exceção: modelos treinados finais (copie best.pt / best.onnx / best.tflite para models/ ou assets/)
+!models/*.pt
+!models/*.onnx
+!models/*.tflite
+!android_app/app/src/main/assets/*.tflite
