@@ -1,0 +1,7 @@
+{
+  "name": "CarParts YOLO26-seg",
+  "description": "Sistema de detecção e segmentação de 23 peças automotivas em tempo real e galeria com YOLO26n-seg e LiteRT (TFLite).",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
