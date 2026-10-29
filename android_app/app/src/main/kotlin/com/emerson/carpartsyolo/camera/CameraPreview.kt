@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -12,7 +11,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -36,6 +37,12 @@ fun CameraPreview(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    // Mantém referências atualizadas para os sliders sem reiniciar a câmera ao arrastá-los
+    val currentConfThreshold by rememberUpdatedState(confThreshold)
+    val currentIouThreshold by rememberUpdatedState(iouThreshold)
+    val currentMaskOpacity by rememberUpdatedState(maskOpacity)
+    val currentOnResult by rememberUpdatedState(onResult)
+
     val executor = remember { Executors.newSingleThreadExecutor() }
     val isAnalyzing = remember { AtomicBoolean(false) }
 
@@ -46,7 +53,13 @@ fun CameraPreview(
         }
     }
 
-    DisposableEffect(cameraSelector, confThreshold, iouThreshold, maskOpacity, segmenter.isModelLoaded) {
+    DisposableEffect(Unit) {
+        onDispose {
+            executor.shutdown()
+        }
+    }
+
+    DisposableEffect(cameraSelector, lifecycleOwner) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         cameraProviderFuture.addListener({
@@ -81,13 +94,13 @@ fun CameraPreview(
 
                         val result = segmenter.segment(
                             bitmap = rotatedBitmap,
-                            confThreshold = confThreshold,
-                            iouThreshold = iouThreshold,
-                            maskOpacity = maskOpacity
+                            confThreshold = currentConfThreshold,
+                            iouThreshold = currentIouThreshold,
+                            maskOpacity = currentMaskOpacity
                         )
 
                         previewView.post {
-                            onResult(result)
+                            currentOnResult(result)
                         }
                     }
                 } catch (e: Exception) {

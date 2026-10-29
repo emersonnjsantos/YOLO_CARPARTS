@@ -3,7 +3,6 @@ package com.emerson.carpartsyolo.ml
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.Matrix
 import android.os.SystemClock
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
@@ -12,14 +11,15 @@ import java.io.File
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 class YoloSegmenter(private val context: Context) : AutoCloseable {
 
+    private val lock = Any()
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
 
@@ -28,7 +28,7 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
         private set
     var inputHeight = 640
         private set
-    private var isNCHW = false
+    private var isNCHW = true
 
     // Formato do tensor 0 (detecções): [1, 59, 8400] ou [1, 8400, 59]
     private var numChannels0 = 59
@@ -41,12 +41,24 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
     private var protoWidth = 160
     private var isProtoNCHW = true
 
-    val isModelLoaded: Boolean get() = interpreter != null
+    // Buffers reutilizáveis para evitar alocações e GC a cada frame
+    private var inputByteBuffer: ByteBuffer? = null
+    private var inputPixels: IntArray? = null
+    private var letterboxBitmap: Bitmap? = null
+    private var letterboxCanvas: android.graphics.Canvas? = null
+    private var output0ByteBuffer: ByteBuffer? = null
+    private var output0Floats: FloatArray? = null
+    private var output1ByteBuffer: ByteBuffer? = null
+    private var output1Floats: FloatArray? = null
+
+    val isModelLoaded: Boolean
+        get() = synchronized(lock) { interpreter != null }
+
     var currentModelName: String = ""
         private set
 
     /**
-     * Tenta carregar o modelo de um dos assets conhecidos ou de um arquivo externo.
+     * Tenta carregar o modelo de um dos assets conhecidos.
      */
     fun loadDefaultModel(): Boolean {
         val candidates = listOf("best.tflite", "carparts_yolo26n.tflite", "model.tflite")
@@ -60,68 +72,92 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
     }
 
     fun loadFromAssets(assetName: String): Boolean {
-        close()
-        return try {
-            val fileDescriptor = context.assets.openFd(assetName)
-            val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
-            val fileChannel = inputStream.channel
-            val startOffset = fileDescriptor.startOffset
-            val declaredLength = fileDescriptor.declaredLength
-            val buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
-            initInterpreter(buffer, assetName)
-            true
-        } catch (e: Exception) {
-            e.printStackTrace()
-            false
+        return synchronized(lock) {
+            closeInternal()
+            try {
+                val fileDescriptor = context.assets.openFd(assetName)
+                val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
+                val fileChannel = inputStream.channel
+                val startOffset = fileDescriptor.startOffset
+                val declaredLength = fileDescriptor.declaredLength
+                val buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+                initInterpreter(buffer, assetName)
+                true
+            } catch (e: Exception) {
+                e.printStackTrace()
+                false
+            }
         }
     }
 
     fun loadFromFile(file: File): Boolean {
-        close()
-        return try {
-            val inputStream = FileInputStream(file)
-            val fileChannel = inputStream.channel
-            val buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, 0, file.length())
-            initInterpreter(buffer, file.name)
-            true
-        } catch (e: Exception) {
-            e.printStackTrace()
-            false
+        return synchronized(lock) {
+            closeInternal()
+            try {
+                val inputStream = FileInputStream(file)
+                val fileChannel = inputStream.channel
+                val buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, 0, file.length())
+                initInterpreter(buffer, file.name)
+                true
+            } catch (e: Exception) {
+                e.printStackTrace()
+                false
+            }
         }
     }
 
     fun loadFromByteBuffer(buffer: ByteBuffer, name: String = "custom.tflite"): Boolean {
-        close()
-        return try {
-            initInterpreter(buffer, name)
-            true
-        } catch (e: Exception) {
-            e.printStackTrace()
-            false
+        return synchronized(lock) {
+            closeInternal()
+            try {
+                initInterpreter(buffer, name)
+                true
+            } catch (e: Exception) {
+                e.printStackTrace()
+                false
+            }
         }
     }
 
     private fun initInterpreter(buffer: ByteBuffer, modelName: String) {
-        val options = Interpreter.Options().apply {
-            setNumThreads(4)
-            try {
-                val compatList = CompatibilityList()
-                if (compatList.isDelegateSupportedOnThisDevice) {
-                    val delegate = GpuDelegate()
-                    gpuDelegate = delegate
+        var interp: Interpreter? = null
+
+        // Tenta inicializar com GPU Delegate; caso o grafo tenha ops incompatíveis, faz fallback seguro para CPU + XNNPACK
+        try {
+            val compatList = CompatibilityList()
+            if (compatList.isDelegateSupportedOnThisDevice) {
+                val delegate = GpuDelegate()
+                val gpuOptions = Interpreter.Options().apply {
+                    setNumThreads(4)
                     addDelegate(delegate)
                 }
-            } catch (_: Throwable) {
-                gpuDelegate = null
+                buffer.rewind()
+                interp = Interpreter(buffer, gpuOptions)
+                gpuDelegate = delegate
             }
+        } catch (_: Throwable) {
+            try {
+                gpuDelegate?.close()
+            } catch (_: Throwable) {
+            }
+            gpuDelegate = null
+            interp = null
         }
 
-        val interp = Interpreter(buffer, options)
+        if (interp == null) {
+            val cpuOptions = Interpreter.Options().apply {
+                setNumThreads(4)
+                setUseXNNPACK(true)
+            }
+            buffer.rewind()
+            interp = Interpreter(buffer, cpuOptions)
+        }
+
         this.interpreter = interp
         this.currentModelName = modelName
 
-        // Inspeciona formatos de entrada
-        val inShape = interp.getInputTensor(0).shape() // ex: [1, 3, 640, 640] ou [1, 640, 640, 3]
+        // Inspeciona formato de entrada: [1, 3, 640, 640] (NCHW) ou [1, 640, 640, 3] (NHWC)
+        val inShape = interp.getInputTensor(0).shape()
         if (inShape.size == 4) {
             if (inShape[1] == 3) {
                 isNCHW = true
@@ -169,6 +205,28 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
                 }
             }
         }
+
+        // Pré-aloca buffers reutilizáveis
+        val numInputPixels = inputWidth * inputHeight
+        inputByteBuffer = ByteBuffer.allocateDirect(1 * 3 * numInputPixels * 4).apply {
+            order(ByteOrder.nativeOrder())
+        }
+        inputPixels = IntArray(numInputPixels)
+        val lbBmp = Bitmap.createBitmap(inputWidth, inputHeight, Bitmap.Config.ARGB_8888)
+        letterboxBitmap = lbBmp
+        letterboxCanvas = android.graphics.Canvas(lbBmp)
+
+        val out0Count = numChannels0 * numAnchors0
+        output0ByteBuffer = ByteBuffer.allocateDirect(out0Count * 4).apply {
+            order(ByteOrder.nativeOrder())
+        }
+        output0Floats = FloatArray(out0Count)
+
+        val out1Count = protoChannels * protoHeight * protoWidth
+        output1ByteBuffer = ByteBuffer.allocateDirect(out1Count * 4).apply {
+            order(ByteOrder.nativeOrder())
+        }
+        output1Floats = FloatArray(out1Count)
     }
 
     /**
@@ -179,80 +237,82 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
         confThreshold: Float = 0.25f,
         iouThreshold: Float = 0.45f,
         maskOpacity: Int = 140
-    ): DetectionResult {
-        val interp = interpreter ?: return DetectionResult(emptyList(), 0, 0, 0, bitmap.width, bitmap.height)
+    ): DetectionResult = synchronized(lock) {
+        val interp = interpreter
+            ?: return DetectionResult(emptyList(), 0, 0, 0, bitmap.width, bitmap.height)
 
         val t0 = SystemClock.uptimeMillis()
 
-        // 1. Pré-processamento: Redimensiona para 640x640 mantendo proporções (Letterbox)
+        // 1. Pré-processamento: Redimensiona mantendo proporção (Letterbox)
         val originalWidth = bitmap.width
         val originalHeight = bitmap.height
 
         val scale = min(inputWidth.toFloat() / originalWidth, inputHeight.toFloat() / originalHeight)
-        val scaledW = (originalWidth * scale).toInt()
-        val scaledH = (originalHeight * scale).toInt()
+        val scaledW = (originalWidth * scale).roundToInt().coerceAtLeast(1)
+        val scaledH = (originalHeight * scale).roundToInt().coerceAtLeast(1)
         val padX = (inputWidth - scaledW) / 2f
         val padY = (inputHeight - scaledH) / 2f
 
         val resizedBitmap = Bitmap.createScaledBitmap(bitmap, scaledW, scaledH, true)
-        val letterboxBitmap = Bitmap.createBitmap(inputWidth, inputHeight, Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(letterboxBitmap)
-        canvas.drawColor(Color.rgb(114, 114, 114)) // Padrão YOLO cinza 114
-        canvas.drawBitmap(resizedBitmap, padX, padY, null)
+        val lbBitmap = letterboxBitmap ?: Bitmap.createBitmap(inputWidth, inputHeight, Bitmap.Config.ARGB_8888)
+        val lbCanvas = letterboxCanvas ?: android.graphics.Canvas(lbBitmap)
+        lbCanvas.drawColor(Color.rgb(114, 114, 114)) // Padrão YOLO cinza 114
+        lbCanvas.drawBitmap(resizedBitmap, padX, padY, null)
 
-        // Preenche o buffer de entrada Float32 normalizado [0..1]
-        val byteBuffer = ByteBuffer.allocateDirect(1 * 3 * inputWidth * inputHeight * 4).apply {
+        val inBuffer = inputByteBuffer ?: ByteBuffer.allocateDirect(1 * 3 * inputWidth * inputHeight * 4).apply {
             order(ByteOrder.nativeOrder())
         }
+        inBuffer.rewind()
 
-        val pixels = IntArray(inputWidth * inputHeight)
-        letterboxBitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
+        val pixels = inputPixels ?: IntArray(inputWidth * inputHeight)
+        lbBitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
 
+        val inv255 = 1.0f / 255.0f
         if (isNCHW) {
             // Plano R, depois G, depois B
-            val totalPixels = inputWidth * inputHeight
             for (p in pixels) {
-                byteBuffer.putFloat(((p shr 16) and 0xFF) / 255.0f)
+                inBuffer.putFloat(((p shr 16) and 0xFF) * inv255)
             }
             for (p in pixels) {
-                byteBuffer.putFloat(((p shr 8) and 0xFF) / 255.0f)
+                inBuffer.putFloat(((p shr 8) and 0xFF) * inv255)
             }
             for (p in pixels) {
-                byteBuffer.putFloat((p and 0xFF) / 255.0f)
+                inBuffer.putFloat((p and 0xFF) * inv255)
             }
         } else {
             // Intercalado RGB
             for (p in pixels) {
-                byteBuffer.putFloat(((p shr 16) and 0xFF) / 255.0f)
-                byteBuffer.putFloat(((p shr 8) and 0xFF) / 255.0f)
-                byteBuffer.putFloat((p and 0xFF) / 255.0f)
+                inBuffer.putFloat(((p shr 16) and 0xFF) * inv255)
+                inBuffer.putFloat(((p shr 8) and 0xFF) * inv255)
+                inBuffer.putFloat((p and 0xFF) * inv255)
             }
         }
+        inBuffer.rewind()
 
         val t1 = SystemClock.uptimeMillis()
 
-        // 2. Inferência TFLite
-        val output0 = Array(1) { Array(numChannels0) { FloatArray(numAnchors0) } }
-        val output1 = Array(1) { Array(protoChannels) { Array(protoHeight) { FloatArray(protoWidth) } } }
+        // 2. Inferência TFLite com ByteBuffers diretos (sem criar milhares de FloatArrays no Heap)
+        val out0Buf = output0ByteBuffer!!
+        val out1Buf = output1ByteBuffer!!
+        out0Buf.rewind()
+        out1Buf.rewind()
 
-        val outputs = mutableMapOf<Int, Any>()
-        if (isTransposed0) {
-            // [1, 8400, 59]
-            val transposedOut0 = Array(1) { Array(numAnchors0) { FloatArray(numChannels0) } }
-            outputs[0] = transposedOut0
-            if (interp.outputTensorCount > 1) outputs[1] = output1
-            interp.runForMultipleInputsOutputs(arrayOf(byteBuffer), outputs)
+        val outputs = HashMap<Int, Any>(2)
+        outputs[0] = out0Buf
+        if (interp.outputTensorCount > 1) {
+            outputs[1] = out1Buf
+        }
 
-            // Desvirar para acesso rápido out0[canal][âncora]
-            for (a in 0 until numAnchors0) {
-                for (c in 0 until numChannels0) {
-                    output0[0][c][a] = transposedOut0[0][a][c]
-                }
-            }
-        } else {
-            outputs[0] = output0
-            if (interp.outputTensorCount > 1) outputs[1] = output1
-            interp.runForMultipleInputsOutputs(arrayOf(byteBuffer), outputs)
+        interp.runForMultipleInputsOutputs(arrayOf(inBuffer), outputs)
+
+        out0Buf.rewind()
+        val out0 = output0Floats!!
+        out0Buf.asFloatBuffer().get(out0)
+
+        val out1 = output1Floats!!
+        if (interp.outputTensorCount > 1) {
+            out1Buf.rewind()
+            out1Buf.asFloatBuffer().get(out1)
         }
 
         val t2 = SystemClock.uptimeMillis()
@@ -262,24 +322,50 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
         val rawDetections = mutableListOf<RawDetection>()
 
         for (a in 0 until numAnchors0) {
-            // Determina a classe de maior probabilidade entre 4 e 26
             var maxScore = 0f
             var bestClass = -1
-            for (c in 0 until numClasses) {
-                val score = output0[0][4 + c][a]
-                if (score > maxScore) {
-                    maxScore = score
-                    bestClass = c
+
+            if (!isTransposed0) {
+                // Layout [1, 59, 8400]: elemento (c, a) está em c * numAnchors0 + a
+                for (c in 0 until numClasses) {
+                    val score = out0[(4 + c) * numAnchors0 + a]
+                    if (score > maxScore) {
+                        maxScore = score
+                        bestClass = c
+                    }
+                }
+            } else {
+                // Layout [1, 8400, 59]: elemento (a, c) está em a * numChannels0 + c
+                val baseIdx = a * numChannels0
+                for (c in 0 until numClasses) {
+                    val score = out0[baseIdx + 4 + c]
+                    if (score > maxScore) {
+                        maxScore = score
+                        bestClass = c
+                    }
                 }
             }
 
             if (maxScore >= confThreshold && bestClass >= 0) {
-                var cx = output0[0][0][a]
-                var cy = output0[0][1][a]
-                var w = output0[0][2][a]
-                var h = output0[0][3][a]
+                var cx: Float
+                var cy: Float
+                var w: Float
+                var h: Float
 
-                // Normaliza se veio em coordenadas de pixel 0..640
+                if (!isTransposed0) {
+                    cx = out0[0 * numAnchors0 + a]
+                    cy = out0[1 * numAnchors0 + a]
+                    w = out0[2 * numAnchors0 + a]
+                    h = out0[3 * numAnchors0 + a]
+                } else {
+                    val baseIdx = a * numChannels0
+                    cx = out0[baseIdx + 0]
+                    cy = out0[baseIdx + 1]
+                    w = out0[baseIdx + 2]
+                    h = out0[baseIdx + 3]
+                }
+
+                // Normaliza caso venha em coordenadas de pixel 0..640
                 if (cx > 1.5f || cy > 1.5f || w > 1.5f || h > 1.5f) {
                     cx /= inputWidth
                     cy /= inputHeight
@@ -293,17 +379,27 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
                 val origRight = (((cx + w / 2f) * inputWidth - padX) / scaledW).coerceIn(0f, 1f)
                 val origBottom = (((cy + h / 2f) * inputHeight - padY) / scaledH).coerceIn(0f, 1f)
 
+                if (origRight - origLeft <= 0.005f || origBottom - origTop <= 0.005f) continue
+
                 // Coeficientes da máscara (32 floats a partir do canal 27)
                 val maskCoeffs = FloatArray(protoChannels)
-                for (k in 0 until protoChannels) {
-                    maskCoeffs[k] = output0[0][4 + numClasses + k][a]
+                if (!isTransposed0) {
+                    for (k in 0 until protoChannels) {
+                        maskCoeffs[k] = out0[(4 + numClasses + k) * numAnchors0 + a]
+                    }
+                } else {
+                    val baseIdx = a * numChannels0 + 4 + numClasses
+                    for (k in 0 until protoChannels) {
+                        maskCoeffs[k] = out0[baseIdx + k]
+                    }
                 }
 
-                // Coordenadas relativas ao frame 640x640 para recorte no mapa proto
-                val protoBoxLeft = ((cx - w / 2f) * protoWidth).coerceIn(0f, protoWidth - 1f)
-                val protoBoxTop = ((cy - h / 2f) * protoHeight).coerceIn(0f, protoHeight - 1f)
-                val protoBoxRight = ((cx + w / 2f) * protoWidth).coerceIn(0f, protoWidth - 1f)
-                val protoBoxBottom = ((cy + h / 2f) * protoHeight).coerceIn(0f, protoHeight - 1f)
+                // Coordenadas exatas da caixa visível mapeadas no grid de protótipos 160x160
+                // (garante alinhamento 1:1 perfeito com origLeft..origBottom ao desenhar na tela)
+                val protoBoxLeft = (((origLeft * scaledW + padX) / inputWidth) * protoWidth).coerceIn(0f, protoWidth - 1f)
+                val protoBoxTop = (((origTop * scaledH + padY) / inputHeight) * protoHeight).coerceIn(0f, protoHeight - 1f)
+                val protoBoxRight = (((origRight * scaledW + padX) / inputWidth) * protoWidth).coerceIn(0f, protoWidth - 1f)
+                val protoBoxBottom = (((origBottom * scaledH + padY) / inputHeight) * protoHeight).coerceIn(0f, protoHeight - 1f)
 
                 rawDetections.add(
                     RawDetection(
@@ -320,12 +416,12 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
         // Aplica NMS
         val nmsDetections = applyNMS(rawDetections, iouThreshold)
 
-        // 4. Reconstrói máscaras para os itens retidos no NMS
+        // 4. Reconstrói máscaras recortadas exatamente para a BoundingBox de cada peça
         val segmentedParts = mutableListOf<SegmentedPart>()
         for (det in nmsDetections) {
             val partClass = CarPartsCatalog.get(det.classId)
-            val maskBitmap = generateMaskBitmap(
-                protoTensor = output1[0],
+            val maskBitmap = generateCroppedMaskBitmap(
+                protoFloats = out1,
                 coeffs = det.maskCoeffs,
                 protoBox = det.protoBox,
                 color = partClass.color,
@@ -354,42 +450,67 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
         )
     }
 
-    private fun generateMaskBitmap(
-        protoTensor: Array<Array<FloatArray>>, // [32][160][160]
+    /**
+     * Gera o Bitmap da máscara APENAS para a região recortada da Bounding Box (cropW x cropH),
+     * para que o DetectionOverlay desenhe a máscara perfeitamente alinhada sobre a peça.
+     */
+    private fun generateCroppedMaskBitmap(
+        protoFloats: FloatArray,
         coeffs: FloatArray,
         protoBox: BoundingBox,
         color: Int,
         alpha: Int
     ): Bitmap {
-        val maskBmp = Bitmap.createBitmap(protoWidth, protoHeight, Bitmap.Config.ARGB_8888)
-        val pixels = IntArray(protoWidth * protoHeight)
+        val minX = protoBox.left.toInt().coerceIn(0, protoWidth - 1)
+        val maxX = protoBox.right.roundToInt().coerceIn(minX, protoWidth - 1)
+        val minY = protoBox.top.toInt().coerceIn(0, protoHeight - 1)
+        val maxY = protoBox.bottom.roundToInt().coerceIn(minY, protoHeight - 1)
 
-        val minX = protoBox.left.toInt()
-        val maxX = protoBox.right.toInt()
-        val minY = protoBox.top.toInt()
-        val maxY = protoBox.bottom.toInt()
+        val cropW = (maxX - minX + 1).coerceAtLeast(1)
+        val cropH = (maxY - minY + 1).coerceAtLeast(1)
 
+        val pixels = IntArray(cropW * cropH)
         val r = Color.red(color)
         val g = Color.green(color)
         val b = Color.blue(color)
-        val maskColor = Color.argb(alpha, r, g, b)
+        val maskColor = Color.argb(alpha.coerceIn(0, 255), r, g, b)
 
-        for (y in minY..maxY) {
-            val rowOffset = y * protoWidth
-            for (x in minX..maxX) {
+        val spatialSize = protoHeight * protoWidth
+
+        for (cy in 0 until cropH) {
+            val py = minY + cy
+            val rowOutOffset = cy * cropW
+            for (cx in 0 until cropW) {
+                val px = minX + cx
                 var sum = 0f
-                for (k in 0 until protoChannels) {
-                    sum += coeffs[k] * protoTensor[k][y][x]
+
+                if (isProtoNCHW) {
+                    // [1, 32, 160, 160]: índice = k * (160*160) + py * 160 + px
+                    val pixelOffset = py * protoWidth + px
+                    for (k in 0 until protoChannels) {
+                        sum += coeffs[k] * protoFloats[k * spatialSize + pixelOffset]
+                    }
+                } else {
+                    // [1, 160, 160, 32]: índice = (py * 160 + px) * 32 + k
+                    val baseOffset = (py * protoWidth + px) * protoChannels
+                    for (k in 0 until protoChannels) {
+                        sum += coeffs[k] * protoFloats[baseOffset + k]
+                    }
                 }
-                // Sigmoid
-                val sigmoid = 1.0f / (1.0f + exp(-sum))
-                if (sigmoid > 0.5f) {
-                    pixels[rowOffset + x] = maskColor
+
+                // Sigmoid > 0.5 equivale a logit (sum) > 0.0f!
+                if (sum > 0f) {
+                    // Suaviza levemente a borda próxima de 0 para visual mais limpo
+                    val prob = 1.0f / (1.0f + exp(-sum))
+                    if (prob > 0.5f) {
+                        pixels[rowOutOffset + cx] = maskColor
+                    }
                 }
             }
         }
 
-        maskBmp.setPixels(pixels, 0, protoWidth, 0, 0, protoWidth, protoHeight)
+        val maskBmp = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888)
+        maskBmp.setPixels(pixels, 0, cropW, 0, 0, cropW, cropH)
         return maskBmp
     }
 
@@ -429,11 +550,23 @@ class YoloSegmenter(private val context: Context) : AutoCloseable {
         return if (unionArea > 0f) interArea / unionArea else 0f
     }
 
-    override fun close() {
-        interpreter?.close()
+    private fun closeInternal() {
+        try {
+            interpreter?.close()
+        } catch (_: Throwable) {
+        }
         interpreter = null
-        gpuDelegate?.close()
+        try {
+            gpuDelegate?.close()
+        } catch (_: Throwable) {
+        }
         gpuDelegate = null
+    }
+
+    override fun close() {
+        synchronized(lock) {
+            closeInternal()
+        }
     }
 
     private data class RawDetection(

@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -68,6 +70,22 @@ fun MainScreen(
         viewModel.setModelStatus(loaded, if (loaded) segmenter.currentModelName else "Não carregado")
         onDispose {
             segmenter.close()
+        }
+    }
+
+    // Reprocessa automaticamente a foto da galeria quando os sliders ou modelo mudarem
+    LaunchedEffect(uiState.confThreshold, uiState.iouThreshold, uiState.maskOpacity, uiState.isModelLoaded) {
+        val bmp = uiState.galleryBitmap
+        if (bmp != null && uiState.isModelLoaded) {
+            val result = withContext(Dispatchers.Default) {
+                segmenter.segment(
+                    bitmap = bmp,
+                    confThreshold = uiState.confThreshold,
+                    iouThreshold = uiState.iouThreshold,
+                    maskOpacity = uiState.maskOpacity
+                )
+            }
+            viewModel.setGalleryImage(bmp, result)
         }
     }
 
@@ -323,6 +341,7 @@ private fun LiveCameraContent(
             showLabels = uiState.showLabels,
             showMasks = uiState.showMasks,
             isMirrored = uiState.cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA,
+            isFillCenter = true,
             modifier = Modifier.fillMaxSize()
         )
 
@@ -524,6 +543,7 @@ private fun GalleryContent(
                             showBoxes = uiState.showBoxes,
                             showLabels = uiState.showLabels,
                             showMasks = uiState.showMasks,
+                            isFillCenter = false,
                             modifier = Modifier.fillMaxSize()
                         )
 
@@ -849,8 +869,28 @@ private fun ModelPickerBottomSheet(
 
 private suspend fun loadBitmapFromUri(context: Context, uri: Uri): Bitmap? = withContext(Dispatchers.IO) {
     try {
-        val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
-        BitmapFactory.decodeStream(inputStream)
+        val orientation = context.contentResolver.openInputStream(uri)?.use { exifStream ->
+            ExifInterface(exifStream).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
+        } ?: ExifInterface.ORIENTATION_NORMAL
+
+        val rawBitmap = context.contentResolver.openInputStream(uri)?.use { imgStream ->
+            BitmapFactory.decodeStream(imgStream)
+        } ?: return@withContext null
+
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+            else -> return@withContext rawBitmap
+        }
+
+        Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
     } catch (e: Exception) {
         e.printStackTrace()
         null
