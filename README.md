@@ -146,6 +146,76 @@ Valores iniciais da interface:
 | Opacidade da máscara | `160` |
 | Entrada do modelo | `640×640` |
 
+## Relatório de expansão: catálogo em tempo real
+
+O pipeline atual pode evoluir de uma demonstração de visão computacional para uma plataforma de inventário automotivo. A proposta é registrar cada veículo, peça identificada e evento de inspeção em um banco de dados centralizado, permitindo que diferentes unidades acompanhem o estoque e o histórico operacional em tempo real.
+
+### Público e aplicações
+
+| Operação | Aplicação prática |
+| --- | --- |
+| **Garagens e oficinas** | Check-in visual, orçamento, checklist de peças, ordens de serviço e histórico de reparos. |
+| **Ferros-velhos e desmontes** | Catalogação automática de peças recuperadas, localização física, estado de conservação e disponibilidade para venda. |
+| **Revendas** | Inventário de veículos, conferência visual, identificação de componentes e apoio à avaliação de usados. |
+| **Locadoras** | Vistoria na retirada e devolução, comparação entre inspeções e registro de avarias com evidências fotográficas. |
+| **Seguradoras** | Triagem de sinistros, estimativa inicial de danos, auditoria de peças e acompanhamento de reparos. |
+
+### Modelo de dados sugerido
+
+Uma API multiempresa pode usar PostgreSQL como banco transacional, armazenamento de objetos para imagens e WebSocket ou eventos publicados para atualizações em tempo real.
+
+| Entidade | Informações principais |
+| --- | --- |
+| `organizations` | Empresa, filial, tipo de operação e configurações de acesso. |
+| `users` | Usuário, função, unidade e permissões. |
+| `vehicles` | VIN/chassi, placa protegida, marca, modelo, ano e status. |
+| `inspections` | Veículo, operador, data, quilometragem, localização e origem da inspeção. |
+| `detections` | Classe da peça, confiança, máscara, caixa, imagem e versão do modelo. |
+| `parts_inventory` | Peça, condição, quantidade, preço, localização e disponibilidade. |
+| `work_orders` | Serviço, peças utilizadas, responsável, custo e status. |
+| `damage_reports` | Avaria, severidade, evidências, aprovação e vínculo com sinistro. |
+| `audit_events` | Quem alterou o quê, quando, dispositivo e motivo da alteração. |
+
+Cada detecção deve conservar `model_version`, `confidence_threshold`, `iou_threshold`, `source_image_id` e `created_at`. Isso torna o resultado reproduzível, permite comparar versões do modelo e evita misturar uma predição nova com um inventário antigo.
+
+### Fluxo de catalogação em tempo real
+
+1. O operador cadastra ou seleciona o veículo e inicia uma inspeção pela câmera ou galeria.
+2. O modelo detecta as peças no dispositivo e envia imagem, máscaras e metadados para a API.
+3. A API valida a organização, grava a inspeção e publica um evento `inspection.updated`.
+4. O painel atualiza estoque, disponibilidade e alertas sem recarregar a página.
+5. Um responsável pode revisar, corrigir ou aprovar a detecção; toda alteração fica registrada no histórico.
+6. O sistema gera um relatório exportável para orçamento, venda, locação ou sinistro.
+
+### Arquitetura recomendada
+
+```text
+Web / Android
+    ↓
+API autenticada (REST ou GraphQL)
+    ├── PostgreSQL: veículos, peças, inspeções e auditoria
+    ├── Object Storage: fotos, máscaras e relatórios
+    ├── Redis / fila: eventos, sincronização e tarefas assíncronas
+    └── WebSocket: atualização dos painéis em tempo real
+```
+
+Para unidades com internet instável, o aplicativo deve manter uma fila local, usar IDs idempotentes e sincronizar posteriormente. O processamento inicial no dispositivo reduz latência e exposição de imagens; o servidor pode executar uma segunda análise quando for necessária maior precisão.
+
+### Indicadores de negócio
+
+- Peças disponíveis por filial, categoria, condição e localização.
+- Tempo médio entre inspeção e publicação do item.
+- Taxa de detecções aprovadas e corrigidas por classe.
+- Custo estimado e valor de revenda por veículo.
+- Frequência de avarias por modelo, filial ou período.
+- Diferença entre a vistoria de entrada e a de saída.
+
+### Segurança e governança
+
+O banco deve separar os dados por organização, aplicar controle de acesso por função e criptografar dados sensíveis. Placas, VINs, documentos e imagens de clientes devem ter retenção configurável, trilha de auditoria e acesso mínimo necessário. Antes de uma implantação comercial, também é necessário definir consentimento, base legal, política de retenção e conformidade com a LGPD.
+
+Essa arquitetura é uma proposta de evolução; o repositório atualmente implementa o pipeline de detecção e as interfaces web/Android, mas ainda não possui API, autenticação ou banco de dados operacional.
+
 ## Tecnologias
 
 - **Web:** React 19, TypeScript, Vite, Tailwind CSS e Lucide.
