@@ -20,6 +20,37 @@ Sistema de visão computacional para detecção e segmentação de peças automo
 
 O CarParts identifica e segmenta **23 classes de peças automotivas** usando um modelo YOLO de segmentação exportado para LiteRT/TensorFlow Lite. As detecções são exibidas com máscaras coloridas, caixas delimitadoras, rótulos e confiança.
 
+## Demonstração visual
+
+As imagens abaixo mostram as principais superfícies da aplicação e como os resultados da inferência são apresentados. A largura foi limitada no README para preservar a hierarquia visual; os arquivos originais permanecem em [`assets/screenshots/`](assets/screenshots/).
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/screenshots/catalogo-pecas.png" width="420" alt="Catálogo de peças automotivas">
+      <br><strong>Catálogo de classes</strong><br>
+      <sub>Consulta dos IDs, chaves, cores, amostras e métricas mAP50 das peças reconhecidas.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/screenshots/galeria.jpg" width="420" alt="Detecção de peças em imagem da galeria">
+      <br><strong>Inferência em galeria</strong><br>
+      <sub>Imagem estática com máscaras, caixas, confiança, telemetria e lista ordenada de detecções.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/screenshots/camera-ao-vivo.jpg" width="420" alt="Segmentação de peças com câmera ao vivo">
+      <br><strong>Câmera ao vivo</strong><br>
+      <sub>Pipeline contínuo para inspeção automotiva com pré-processamento, inferência e pós-processamento.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/screenshots/modelo-deteccao.jpg" width="420" alt="Exemplo de detecção e segmentação automotiva">
+      <br><strong>Resultado segmentado</strong><br>
+      <sub>Exemplo visual de localização de componentes e sobreposição das máscaras por classe.</sub>
+    </td>
+  </tr>
+</table>
+
 ### Funcionalidades
 
 - Câmera ao vivo com atualização contínua das detecções.
@@ -49,7 +80,12 @@ YOLO_CARPARTS/
 │       ├── kotlin/.../ml/       # Inferência LiteRT/TFLite
 │       └── kotlin/.../ui/       # Compose, estado e overlay de detecção
 ├── assets/
-│   └── social-preview.jpg       # Arte para a prévia social do GitHub
+│   ├── social-preview.jpg       # Arte para a prévia social do GitHub
+│   └── screenshots/             # Imagens técnicas usadas na documentação
+│       ├── catalogo-pecas.png
+│       ├── galeria.jpg
+│       ├── camera-ao-vivo.jpg
+│       └── modelo-deteccao.jpg
 └── package.json
 ```
 
