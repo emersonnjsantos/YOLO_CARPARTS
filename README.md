@@ -1,9 +1,7 @@
 # CarParts YOLO26-seg
 
 <p align="center">
-  <a href="https://colab.research.google.com/github/emersonnjsantos/YOLO_CARPARTS/blob/main/yolo_carparts.ipynb">
-    <img src="https://img.shields.io/badge/Google%20Colab-F9AB00?logo=googlecolab&logoColor=white" alt="Abrir no Google Colab">
-  </a>
+  <a href="https://colab.research.google.com/github/emersonnjsantos/YOLO_CARPARTS/blob/main/yolo_carparts.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
   <a href="https://github.com/ultralytics/ultralytics">
     <img src="https://img.shields.io/badge/Ultralytics-111F68?logo=ultralytics&logoColor=white" alt="Ultralytics">
   </a>
