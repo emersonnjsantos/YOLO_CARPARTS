@@ -1,5 +1,23 @@
 # CarParts YOLO26-seg
 
+<p align="center">
+  <a href="https://colab.research.google.com/github/emersonnjsantos/YOLO_CARPARTS/blob/main/yolo_carparts.ipynb">
+    <img src="https://img.shields.io/badge/Google%20Colab-F9AB00?logo=googlecolab&logoColor=white" alt="Abrir no Google Colab">
+  </a>
+  <a href="https://github.com/ultralytics/ultralytics">
+    <img src="https://img.shields.io/badge/Ultralytics-111F68?logo=ultralytics&logoColor=white" alt="Ultralytics">
+  </a>
+  <a href="https://www.tensorflow.org/lite">
+    <img src="https://img.shields.io/badge/LiteRT%20%2F%20TFLite-FF6F00?logo=tensorflow&logoColor=white" alt="LiteRT e TensorFlow Lite">
+  </a>
+  <a href="https://react.dev/">
+    <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111827" alt="React 19">
+  </a>
+  <a href="https://developer.android.com/jetpack/compose">
+    <img src="https://img.shields.io/badge/Android%20%2B%20Compose-3DDC84?logo=android&logoColor=white" alt="Android e Jetpack Compose">
+  </a>
+</p>
+
 Sistema de visão computacional para detecção e segmentação de peças automotivas. O projeto oferece uma experiência web para demonstração e um aplicativo Android nativo para inferência com câmera ou imagens da galeria.
 
 ![CarParts YOLO26-seg](assets/social-preview.jpg)
